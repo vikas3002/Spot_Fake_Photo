@@ -52,7 +52,6 @@ All features run on a 512px-resized image using only OpenCV + NumPy — no GPU, 
 ## Quick start
 
 ```bash
-git clone https://github.com/<your-username>/<repo-name>.git
 cd spot_fake_photo
 pip install -r requirements.txt
 
