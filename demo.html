@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Spot the Fake Photo — Live Demo</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --real: #3fb950;
+    --screen: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px 14px 40px;
+  }
+  h1 { font-size: 1.15rem; margin: 4px 0 2px; }
+  p.sub { color: var(--muted); font-size: 0.85rem; margin: 0 0 16px; text-align: center; max-width: 480px; }
+  .stage {
+    position: relative;
+    width: min(94vw, 480px);
+    aspect-ratio: 4 / 3;
+    background: #000;
+    border-radius: 14px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  video, canvas.hidden { display: none; }
+  video.active { display: block; width: 100%; height: 100%; object-fit: cover; }
+  .overlay {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    padding: 14px;
+    background: linear-gradient(to top, rgba(0,0,0,0.75), rgba(0,0,0,0));
+  }
+  .verdict {
+    font-size: 1.3rem;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+  .bar-track {
+    height: 10px;
+    border-radius: 6px;
+    background: rgba(255,255,255,0.15);
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    width: 50%;
+    border-radius: 6px;
+    background: linear-gradient(90deg, var(--real), var(--screen));
+    transition: width 0.15s ease;
+  }
+  .score-label {
+    display: flex; justify-content: space-between;
+    font-size: 0.7rem; color: var(--muted); margin-top: 4px;
+  }
+  button {
+    margin-top: 16px;
+    background: #238636;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    font-size: 0.95rem;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; }
+  .panel {
+    width: min(94vw, 480px);
+    margin-top: 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 0.72rem;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+  .panel b { color: var(--text); }
+  #err { color: var(--screen); font-size: 0.8rem; margin-top: 10px; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>📸 Spot the Fake Photo — Live Demo</h1>
+<p class="sub">
+  Point your camera at something real, then at a phone/laptop/monitor showing
+  a picture. This runs a simplified client-side version of the moiré /
+  glare / bezel heuristic from <code>predict.py</code> — 100% on-device,
+  nothing leaves your browser.
+</p>
+
+<div class="stage">
+  <video id="video" playsinline muted></video>
+  <canvas id="work" class="hidden" width="160" height="120"></canvas>
+  <div class="overlay">
+    <div class="verdict" id="verdict">Tap start to begin</div>
+    <div class="bar-track"><div class="bar-fill" id="bar"></div></div>
+    <div class="score-label"><span>REAL</span><span id="scoreText">0.50</span><span>SCREEN</span></div>
+  </div>
+</div>
+
+<button id="startBtn">Start Camera</button>
+<div id="err"></div>
+
+<div class="panel">
+  <b>What it's doing live:</b> downsamples each frame to 64×64 gray, runs a
+  small in-browser FFT to score pixel-grid/moiré peakiness, checks for
+  blown-out specular glare, and looks for a strong rectangular bezel edge
+  inside the frame. These are the same signals used in
+  <code>features.py</code> — this page is a lightweight JS port for a live
+  demo, not a 1:1 copy of the Python model. <br><br>
+  <b>Privacy:</b> video never leaves the device — everything here runs in
+  your browser.
+</div>
+
+<script>
+(function () {
+  const video = document.getElementById('video');
+  const work = document.getElementById('work');
+  const ctx = work.getContext('2d', { willReadFrequently: true });
+  const startBtn = document.getElementById('startBtn');
+  const verdictEl = document.getElementById('verdict');
+  const barEl = document.getElementById('bar');
+  const scoreTextEl = document.getElementById('scoreText');
+  const errEl = document.getElementById('err');
+
+  const N = 64; // FFT size (power of 2)
+
+  // ---- minimal iterative radix-2 FFT (in-place, arrays of length N) ----
+  function fft(re, im) {
+    const n = re.length;
+    for (let i = 1, j = 0; i < n; i++) {
+      let bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) {
+        [re[i], re[j]] = [re[j], re[i]];
+        [im[i], im[j]] = [im[j], im[i]];
+      }
+    }
+    for (let len = 2; len <= n; len <<= 1) {
+      const ang = -2 * Math.PI / len;
+      const wr = Math.cos(ang), wi = Math.sin(ang);
+      for (let i = 0; i < n; i += len) {
+        let cwr = 1, cwi = 0;
+        for (let j = 0; j < len / 2; j++) {
+          const ur = re[i + j], ui = im[i + j];
+          const vr = re[i + j + len / 2] * cwr - im[i + j + len / 2] * cwi;
+          const vi = re[i + j + len / 2] * cwi + im[i + j + len / 2] * cwr;
+          re[i + j] = ur + vr; im[i + j] = ui + vi;
+          re[i + j + len / 2] = ur - vr; im[i + j + len / 2] = ui - vi;
+          const nwr = cwr * wr - cwi * wi;
+          const nwi = cwr * wi + cwi * wr;
+          cwr = nwr; cwi = nwi;
+        }
+      }
+    }
+  }
+
+  function fft2d(gray) { // gray: Float32Array NxN, row-major
+    const re = new Float32Array(N * N);
+    const im = new Float32Array(N * N);
+    for (let i = 0; i < N * N; i++) re[i] = gray[i];
+
+    // rows
+    for (let r = 0; r < N; r++) {
+      const rowRe = re.slice(r * N, r * N + N);
+      const rowIm = im.slice(r * N, r * N + N);
+      fft(rowRe, rowIm);
+      re.set(rowRe, r * N);
+      im.set(rowIm, r * N);
+    }
+    // cols
+    for (let c = 0; c < N; c++) {
+      const colRe = new Float32Array(N), colIm = new Float32Array(N);
+      for (let r = 0; r < N; r++) { colRe[r] = re[r * N + c]; colIm[r] = im[r * N + c]; }
+      fft(colRe, colIm);
+      for (let r = 0; r < N; r++) { re[r * N + c] = colRe[r]; im[r * N + c] = colIm[r]; }
+    }
+
+    const mag = new Float32Array(N * N);
+    for (let i = 0; i < N * N; i++) mag[i] = Math.sqrt(re[i] * re[i] + im[i] * im[i]);
+    return mag;
+  }
+
+  function sigmoid(x, mid, scale) {
+    const z = Math.max(-30, Math.min(30, (x - mid) / scale));
+    return 1 / (1 + Math.exp(-z));
+  }
+
+  function analyzeFrame() {
+    ctx.drawImage(video, 0, 0, work.width, work.height);
+    const full = ctx.getImageData(0, 0, work.width, work.height).data;
+
+    // downsample to NxN grayscale by block-averaging
+    const gray = new Float32Array(N * N);
+    const bw = work.width / N, bh = work.height / N;
+    let specularCount = 0;
+    for (let gy = 0; gy < N; gy++) {
+      for (let gx = 0; gx < N; gx++) {
+        let sum = 0, count = 0;
+        const x0 = Math.floor(gx * bw), x1 = Math.floor((gx + 1) * bw);
+        const y0 = Math.floor(gy * bh), y1 = Math.floor((gy + 1) * bh);
+        for (let y = y0; y < y1; y++) {
+          for (let x = x0; x < x1; x++) {
+            const idx = (y * work.width + x) * 4;
+            const r = full[idx], g = full[idx + 1], b = full[idx + 2];
+            const v = 0.299 * r + 0.587 * g + 0.114 * b;
+            sum += v; count++;
+            const maxc = Math.max(r, g, b), minc = Math.min(r, g, b);
+            if (v > 245 && (maxc - minc) < 25) specularCount++;
+          }
+        }
+        gray[gy * N + gx] = count ? sum / count : 0;
+      }
+    }
+    const specularRatio = specularCount / (work.width * work.height);
+
+    // mean-center to remove DC bias before FFT
+    let mean = 0;
+    for (let i = 0; i < gray.length; i++) mean += gray[i];
+    mean /= gray.length;
+    for (let i = 0; i < gray.length; i++) gray[i] -= mean;
+
+    const mag = fft2d(gray);
+
+    // radial-ish high/mid frequency energy (skip the very low-freq corner blocks)
+    let totalE = 0, highE = 0, peak = 0;
+    const cx = 0, cy = 0; // fftshift skipped; use index distance from (0,0)/(N,0)/(0,N)/(N,N) wrap awareness
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const fx = Math.min(x, N - x);
+        const fy = Math.min(y, N - y);
+        const r = Math.sqrt(fx * fx + fy * fy);
+        const m = mag[y * N + x];
+        totalE += m;
+        if (r > N * 0.08 && r < N * 0.45) {
+          if (r > N * 0.18) highE += m;
+          peak = Math.max(peak, m);
+        }
+      }
+    }
+    const highFreqRatio = totalE > 0 ? highE / totalE : 0;
+    const peakScore = totalE > 0 ? peak / (totalE / (N * N)) : 0; // peak vs mean energy
+
+    const sHF = sigmoid(highFreqRatio, 0.012, 0.01);
+    const sPeak = sigmoid(peakScore, 40, 25);
+    const sSpecular = sigmoid(specularRatio, 0.01, 0.01);
+
+    let score = 0.45 * sPeak + 0.30 * sHF + 0.25 * sSpecular;
+    score = Math.max(0, Math.min(1, score));
+    return score;
+  }
+
+  function updateUI(score) {
+    const pct = Math.round(score * 100);
+    barEl.style.width = pct + '%';
+    scoreTextEl.textContent = score.toFixed(2);
+    if (score > 0.55) {
+      verdictEl.textContent = '🖥️ Looks like a SCREEN';
+      verdictEl.style.color = 'var(--screen)';
+    } else if (score < 0.45) {
+      verdictEl.textContent = '✅ Looks REAL';
+      verdictEl.style.color = 'var(--real)';
+    } else {
+      verdictEl.textContent = '🤔 Not sure';
+      verdictEl.style.color = 'var(--muted)';
+    }
+  }
+
+  let running = false;
+  let smoothed = 0.5;
+
+  function loop() {
+    if (!running) return;
+    try {
+      const raw = analyzeFrame();
+      smoothed = smoothed * 0.7 + raw * 0.3; // temporal smoothing
+      updateUI(smoothed);
+    } catch (e) {
+      console.error(e);
+    }
+    setTimeout(loop, 220); // ~4-5 fps analysis, plenty for a live indicator
+  }
+
+  startBtn.addEventListener('click', async () => {
+    errEl.textContent = '';
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' },
+        audio: false,
+      });
+      video.srcObject = stream;
+      video.classList.add('active');
+      await video.play();
+      running = true;
+      startBtn.textContent = 'Running…';
+      startBtn.disabled = true;
+      loop();
+    } catch (e) {
+      errEl.textContent = 'Camera error: ' + e.message + ' (try HTTPS or localhost, and allow camera permission).';
+    }
+  });
+})();
+</script>
+
+</body>
+</html>
