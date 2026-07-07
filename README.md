@@ -68,7 +68,7 @@ That's it — works out of the box with the heuristic, no training required.
 
 **Streamlit app (recommended):**
 ```bash
-streamlit run streamlit_app.py
+streamlit run app.py
 ```
 Opens a local page where you can upload a photo or use your webcam (`st.camera_input`, works on mobile browsers too) and see the live score, verdict, latency, and every raw feature value.
 
@@ -91,7 +91,7 @@ Browsers block camera access on a plain `file://` page, so it must be served. Fo
    python train.py
    ```
    Prints cross-validated accuracy and feature importances, saves `model.joblib`.
-4. `predict.py` and `streamlit_app.py` will automatically use `model.joblib` from then on.
+4. `predict.py` and `app.py` will automatically use `model.joblib` from then on.
 
 ---
 
@@ -102,7 +102,7 @@ spot_fake_photo/
 ├── features.py                     # feature extraction - the actual detection logic
 ├── train.py                        # trains RandomForest on real/ + screen/
 ├── predict.py                      # CLI: python predict.py image.jpg -> 0.93
-├── streamlit_app.py                # local web UI (upload or webcam)
+├── app.py                          # local web UI (upload or webcam)
 ├── demo.html                       # browser-only vanilla-JS live demo (optional)
 ├── requirements.txt
 ├── .gitignore
